@@ -1,0 +1,843 @@
+package enshud.s3.checker;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedList;
+import java.util.List;
+
+
+public class Checker {
+
+	/**
+	 * サンプルmainメソッド．
+	 * 
+	 * 単体テストの対象ではないので自由に改変しても良い．
+	 */
+	static List<Token> tokens = null;
+	static Token currentToken;
+	static int index = 0;
+
+	static LinkedList<LinkedList<Variable>> useableScopeVariables;
+	static LinkedList<Variable> scopeVariables;
+	static LinkedList<Function> functions;
+	
+	
+	public static void main(final String[] args) {
+//		// normalの確認
+		new Checker().run("data/ts/normal01.ts");
+		new Checker().run("data/ts/normal02.ts");
+		new Checker().run("data/ts/normal03.ts");
+		new Checker().run("data/ts/normal04.ts");
+		new Checker().run("data/ts/normal05.ts");
+		new Checker().run("data/ts/normal06.ts");
+		new Checker().run("data/ts/normal07.ts");
+		new Checker().run("data/ts/normal09.ts");
+		new Checker().run("data/ts/normal09.ts");
+		new Checker().run("data/ts/normal10.ts");
+		new Checker().run("data/ts/normal11.ts");
+		new Checker().run("data/ts/normal12.ts");
+		new Checker().run("data/ts/normal13.ts");
+		new Checker().run("data/ts/normal14.ts");
+		new Checker().run("data/ts/normal15.ts");
+		new Checker().run("data/ts/normal16.ts");
+		new Checker().run("data/ts/normal17.ts");
+		new Checker().run("data/ts/normal18.ts");
+		new Checker().run("data/ts/normal19.ts");
+		new Checker().run("data/ts/normal20.ts");
+		
+//
+//		// synerrの確認
+		new Checker().run("data/ts/synerr08.ts");
+//		new Checker().run("data/ts/synerr02.ts");
+
+		// semerrの確認
+//		new Checker().run("data/ts/semerr01.ts");
+//		new Checker().run("data/ts/semerr02.ts");
+//		new Checker().run("data/ts/semerr03.ts");
+//		new Checker().run("data/ts/semerr04.ts");
+//		new Checker().run("data/ts/semerr05.ts");
+//		new Checker().run("data/ts/semerr06.ts");
+//		new Checker().run("data/ts/semerr07.ts");
+//		new Checker().run("data/ts/semerr08.ts");
+	}
+
+	/**
+	 * TODO
+	 * 
+	 * 開発対象となるChecker実行メソッド．
+	 * 以下の仕様を満たすこと．
+	 * 
+	 * 仕様:
+	 * 第一引数で指定されたtsファイルを読み込み，意味解析を行う．
+	 * 意味的に正しい場合は標準出力に"OK"を，正しくない場合は"Semantic error: line"という文字列とともに，
+	 * 最初のエラーを見つけた行の番号を標準エラーに出力すること （例: "Semantic error: line 6"）．
+	 * また，構文的なエラーが含まれる場合もエラーメッセージを表示すること（例： "Syntax error: line 1"）．
+	 * 入力ファイル内に複数のエラーが含まれる場合は，最初に見つけたエラーのみを出力すること．
+	 * 入力ファイルが見つからない場合は標準エラーに"File not found"と出力して終了すること．
+	 * 
+	 * @param inputFileName 入力tsファイル名
+	 */
+	public void run(final String inputFileName) {
+		tokens = new ArrayList<Token>();
+		index=-1;
+		useableScopeVariables = new LinkedList<LinkedList<Variable>>();
+		functions = new LinkedList<Function>();
+	
+		try {
+			tokenAnalysis(inputFileName);
+			
+			program();
+			
+			System.out.println("OK");
+		}
+		catch(ParserSyntaxError e)  
+		{  
+			e.printError();
+		} 
+		catch (CheckerSemanticError e) {
+			e.printError();
+		}
+		catch (IOException e) {
+			System.err.println("File not found");
+		}  
+	}
+	
+	private static void tokenAnalysis(final String inputFileName) throws IOException {
+		int counter, counter2;
+		char c;
+		String word = "";
+		String pasText = null;
+		String lexText = null;
+		String ID = null;
+		String lineNumber = null;
+		
+		counter2 = 0;
+		// analyze the file
+		Path fileName = Path.of(inputFileName);
+		String line = Files.readString(fileName);
+		for (counter=0; counter < line.length(); counter++) {
+			c = line.charAt(counter);
+			if (!isWhiteSpace(c)) {
+				word+=c;
+				continue;
+			}
+			switch(counter2) {
+			case 0:
+				pasText = word;
+				break;
+			case 1:
+				lexText = word;
+				break;
+			case 2:
+				ID = word;
+				break;
+			case 3:
+				lineNumber = word;
+				lineNumber = lineNumber.replaceAll("\\r", "");
+				tokens.add(new Token(pasText,lexText, ID, lineNumber));
+				break;
+			default :
+				break;
+			}
+			word = "";
+			counter2 = ++counter2%4;	
+		}	
+	}
+	
+	private static boolean isWhiteSpace(char c) {
+		return c == '\t' || c == '\n';
+	}
+	
+	private static void program() throws ParserSyntaxError, CheckerSemanticError {
+		getToken();
+		if (!currentToken.getPasText().equals("program")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		programName();
+		
+		getToken();
+		if (!currentToken.getPasText().equals(";")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		block();
+		
+		complexStatement();
+		
+		getToken();
+		if (!currentToken.getPasText().equals(".")) throw new ParserSyntaxError(currentToken.getLineNumber());
+	}
+	
+	private static void programName() throws ParserSyntaxError, CheckerSemanticError{
+		getToken();
+		if (!currentToken.getLexText().equals("SIDENTIFIER")) throw new ParserSyntaxError(currentToken.getLineNumber());
+	}
+
+	private static void block() throws ParserSyntaxError, CheckerSemanticError{
+		// initialize scopeVariables
+		scopeVariables = new LinkedList<Variable>();
+		varDec();
+		useableScopeVariables.addFirst(scopeVariables);
+		subDecGroup();
+	}
+	
+	private static void varDec() throws ParserSyntaxError, CheckerSemanticError{
+		Token tokenTMP = LL(1);
+		if (!tokenTMP.getPasText().equals("var")) return;
+		getToken();
+		
+		varDecSeq();
+	}
+	
+	private static void varDecSeq() throws ParserSyntaxError, CheckerSemanticError{
+		LinkedList<String> varNames = new LinkedList<String>();
+		String varType;
+		
+		varNames = varNameSeq();
+			
+		getToken();
+		if (!currentToken.getPasText().equals(":")) throw new ParserSyntaxError(currentToken.getLineNumber());
+			
+		varType = type();
+			
+		getToken();
+		if (!currentToken.getPasText().equals(";")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		for(String varName : varNames) {
+			scopeVariables.add(new Variable(varName, varType));
+		}
+		
+		Token tokenTMP = LL(1);
+		if(!tokenTMP.getLexText().equals("SIDENTIFIER")) return;
+		varDecSeq();
+	}
+	
+	private static LinkedList<String> varNameSeq() throws ParserSyntaxError, CheckerSemanticError{
+		LinkedList<String> varNames = new LinkedList<String>();
+		varNames.add(varName());
+	
+		Token tokenTMP = LL(1);
+		if(tokenTMP.getPasText().equals(",")) {
+			getToken();
+			varNames.addAll(varNameSeq());
+		}
+		return varNames;
+	}
+	
+	private static String varName() throws ParserSyntaxError, CheckerSemanticError{	
+		getToken();
+		if (!currentToken.getLexText().equals("SIDENTIFIER")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		checkCurrentVariableName(currentToken.getPasText());
+		return currentToken.getPasText();
+	}
+	
+	private static String type() throws ParserSyntaxError, CheckerSemanticError{
+		String typeName = "";
+		Token tokenTMP = LL(1);
+		String nextWord = tokenTMP.getPasText();
+		
+		if(isStandardType(nextWord)) {
+			getToken();
+			
+			typeName = getCurrentVariableType();
+			return typeName;
+		}
+		else if(nextWord.equals("array")) {
+			typeName = arrayType();
+			return typeName;
+		}
+		else throw new ParserSyntaxError(tokenTMP.getLineNumber());
+	}
+	
+	private static boolean isStandardType(String typeName) throws ParserSyntaxError{
+		if(typeName.equals("integer") || typeName.equals("char") || typeName.equals("boolean")) return true;
+		return false;
+	}
+	
+	private static String standardType() throws ParserSyntaxError, CheckerSemanticError{
+		String type;
+		getToken();
+		type = getCurrentVariableType();
+		if(!isStandardType(currentToken.getPasText())) throw new ParserSyntaxError(currentToken.getLineNumber());
+		return type;
+	}
+	
+	private static String arrayType() throws ParserSyntaxError, CheckerSemanticError{
+		String typeName;
+		getToken();
+		
+		if (!currentToken.getPasText().equals("array")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		getToken();
+		if (!currentToken.getPasText().equals("[")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		minIndex();
+		
+		getToken();
+		if (!currentToken.getPasText().equals("..")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		maxIndex();
+
+		getToken();
+		if (!currentToken.getPasText().equals("]")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		getToken();
+		if (!currentToken.getPasText().equals("of")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		typeName = "Array of ";
+		typeName += standardType();
+		return typeName;
+	}
+	
+	private static void minIndex() throws ParserSyntaxError {
+		integer();
+	}
+	
+	private static void maxIndex() throws ParserSyntaxError {
+		integer();
+	}
+	
+	private static String getCurrentVariableType() throws CheckerSemanticError{
+		String currentTokenType = currentToken.getLexText();
+		switch(currentTokenType) {
+		case "SBOOLEAN" :
+			return "boolean";
+		case "SINTEGER" :
+			return "integer";
+		case "SCHAR" :
+			return "string";
+		default :
+			throw new CheckerSemanticError(currentToken.getLineNumber());
+		}
+	}
+	private static void integer() throws ParserSyntaxError{
+		getToken();
+		if(isSymbol(currentToken.getPasText())) getToken();
+		
+		if (!currentToken.getLexText().equals("SCONSTANT")) throw new ParserSyntaxError(currentToken.getLineNumber());
+	}
+	
+	private static boolean isSymbol(String symbolValue) throws ParserSyntaxError{
+		if(symbolValue.equals("+") || symbolValue.equals("-")) return true;
+		return false;
+	}
+	
+	private static void subDecGroup() throws ParserSyntaxError, CheckerSemanticError{
+		Token tokenTMP = LL(1);
+		if(tokenTMP.getPasText().equals("procedure")) {		
+			subDec();
+			
+			getToken();
+			if (!currentToken.getPasText().equals(";")) throw new ParserSyntaxError(currentToken.getLineNumber());
+			
+			removeRecentScope();
+			subDecGroup();
+		}
+	}
+	
+	private static void subDec() throws ParserSyntaxError, CheckerSemanticError{
+		// initialize scopeVariables
+		scopeVariables = new LinkedList<Variable>();
+		subDecHead();
+		
+		varDec();
+		useableScopeVariables.addFirst(scopeVariables);
+
+		complexStatement();	
+	}
+	
+	
+	private static void subDecHead() throws ParserSyntaxError, CheckerSemanticError{
+		String procName;
+		LinkedList<Variable> parameters = new LinkedList<Variable>();
+		getToken();
+		if (!currentToken.getPasText().equals("procedure")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		procName = procedureName();
+		parameters = tempParameter();
+		functions.add(new Function(procName, parameters));
+		
+		getToken();
+		
+		if (!currentToken.getPasText().equals(";")) throw new ParserSyntaxError(currentToken.getLineNumber());
+	}
+	
+	private static LinkedList<Variable> tempParameter() throws ParserSyntaxError, CheckerSemanticError{
+		LinkedList<Variable> parameters = new LinkedList<Variable>();
+		Token tokenTMP = LL(1);
+		if (!tokenTMP.getPasText().equals("(")) return parameters;
+		getToken();
+		
+		parameters = tempParameterSeq();
+		
+		getToken();
+		if (!currentToken.getPasText().equals(")")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		return parameters;
+	}
+	
+	private static String procedureName() throws ParserSyntaxError{
+		getToken();
+		if (!currentToken.getLexText().equals("SIDENTIFIER")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		return currentToken.getPasText();
+	}
+	
+	private static LinkedList<Variable> tempParameterSeq() throws ParserSyntaxError, CheckerSemanticError{
+		LinkedList<String> parNames = new LinkedList<String>();
+		String typeName;
+		LinkedList<Variable> parameters =  new LinkedList<Variable>();
+		Token tokenTMP;
+		
+		parNames = tempParameterNameSeq();
+		
+		getToken();
+		if (!currentToken.getPasText().equals(":")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		typeName = standardType();
+		for(String parName : parNames) {
+			Variable variable = new Variable(parName, typeName);
+			variable.isReferenced = true;
+			parameters.add(variable);
+			scopeVariables.add(variable);
+			
+		}
+		tokenTMP = LL(1);
+		if (tokenTMP.getPasText().equals(";")) {
+			getToken();
+			parameters.addAll(tempParameterSeq());
+		}
+		return parameters;
+	}
+	
+	private static LinkedList<String> tempParameterNameSeq() throws ParserSyntaxError, CheckerSemanticError{
+		LinkedList<String> parNames = new LinkedList<String>();
+		parNames.add(tempParameterName());
+		
+		Token tokenTMP = LL(1);
+		if (tokenTMP.getPasText().equals(",")) {
+			getToken();
+			parNames.addAll(tempParameterNameSeq());
+		}
+		return parNames;
+	}
+	
+	private static String tempParameterName() throws ParserSyntaxError, CheckerSemanticError{
+		getToken();
+		if (!currentToken.getLexText().equals("SIDENTIFIER")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		checkCurrentVariableName(currentToken.getPasText());
+		return currentToken.getPasText();
+	}
+	
+	private static void complexStatement() throws ParserSyntaxError, CheckerSemanticError{	
+		getToken();
+		if (!currentToken.getPasText().equals("begin")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		sentenceSeq();
+		
+		getToken();
+		if (!currentToken.getPasText().equals("end")) throw new ParserSyntaxError(currentToken.getLineNumber());
+	}
+	
+	private static void sentenceSeq() throws ParserSyntaxError, CheckerSemanticError{
+		sentence();
+		
+		getToken();
+		if (!currentToken.getPasText().equals(";")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		Token tokenTMP = LL(1);
+		String nextLexWord = tokenTMP.getLexText();
+		
+		if(nextLexWord.equals("SIF") || nextLexWord.equals("SWHILE") || nextLexWord.equals("SIDENTIFIER") 
+				||nextLexWord.equals("SBEGIN") || nextLexWord.equals("SWRITELN") || nextLexWord.equals("SREADLN") ) {	
+			sentenceSeq();
+		}
+	}
+	
+	private static void sentence() throws ParserSyntaxError, CheckerSemanticError{
+		Token tokenTMP = LL(1);
+		String nextLexWord =tokenTMP.getLexText();
+		
+		if(nextLexWord.equals("SIF")) ifStatement();
+		else if(nextLexWord.equals("SWHILE")) whileStatement();
+		else if(nextLexWord.equals("SREADLN") || nextLexWord.equals("SWRITELN") || nextLexWord.equals("SIDENTIFIER") || nextLexWord.equals("SBEGIN")) basicStatement();
+		else throw new ParserSyntaxError(tokenTMP.getLineNumber());
+	}
+	
+	
+	private static void ifStatement() throws ParserSyntaxError, CheckerSemanticError{
+		String eqType;
+		getToken();
+		if (!currentToken.getPasText().equals("if")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		eqType = equation();
+		
+		if(!eqType.equals("boolean")) throw new CheckerSemanticError(currentToken.getLineNumber());
+
+		getToken();
+		if (!currentToken.getPasText().equals("then")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		complexStatement();
+		
+		Token tokenTMP = LL(1);
+		if (!tokenTMP.getPasText().equals("else")) return;
+		
+		getToken();
+		complexStatement();
+	}
+	
+	private static void whileStatement() throws ParserSyntaxError, CheckerSemanticError{
+		String eqType;
+		
+		getToken();
+		if (!currentToken.getPasText().equals("while")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		eqType = equation();
+		if(!eqType.equals("boolean")) throw new CheckerSemanticError(currentToken.getLineNumber());
+		
+		getToken();
+		if (!currentToken.getPasText().equals("do")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		complexStatement();
+	}
+	
+	private static void basicStatement() throws ParserSyntaxError, CheckerSemanticError{	
+		Token tokenTMP = LL(1);
+		String nextLexWord = tokenTMP.getLexText();
+		
+		if(nextLexWord.equals("SIDENTIFIER")) {
+			tokenTMP= LL(2);
+			if(tokenTMP.getPasText().equals(":=") || tokenTMP.getPasText().equals("[")) subStatement();
+			else if(tokenTMP.getPasText().equals(";") || tokenTMP.getPasText().equals("(")) procedureCallStatement();
+			else throw new ParserSyntaxError(tokenTMP.getLineNumber());
+		}
+		else if(nextLexWord.equals("SREADLN") || nextLexWord.equals("SWRITELN")) inOutStatement();
+		else if(nextLexWord.equals("SBEGIN")) complexStatement();
+		else throw new ParserSyntaxError(tokenTMP.getLineNumber());
+	}
+	
+	private static void subStatement() throws ParserSyntaxError, CheckerSemanticError{
+		String type1, type2;
+		
+		type1 = leftSide();
+		
+		getToken();
+		if (!currentToken.getPasText().equals(":=")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		type2 = equation();
+		if(!type1.equals(type2)) throw new CheckerSemanticError(currentToken.getLineNumber());
+	}
+	
+	private static String leftSide() throws ParserSyntaxError, CheckerSemanticError{
+		return variable();
+	}
+	
+	private static String variable() throws ParserSyntaxError, CheckerSemanticError{
+		Token tokenTMP = LL(1);
+		if(!tokenTMP.getLexText().equals("SIDENTIFIER")) throw new ParserSyntaxError(tokenTMP.getLineNumber());
+		return variable2();
+	}
+	
+	private static String variable2() throws ParserSyntaxError, CheckerSemanticError{
+		String type;
+		type = varName_();
+		
+		Token tokenTMP = LL(1);
+		if(tokenTMP.getPasText().equals("[")) {
+			getToken();
+			index();
+			
+			getToken();
+			if(!currentToken.getPasText().equals("]")) throw new ParserSyntaxError(currentToken.getLineNumber());
+			type = type.substring(9);
+		}
+		return type;
+	}
+	
+	private static String varName_() throws ParserSyntaxError, CheckerSemanticError{	
+		getToken();
+		if (!currentToken.getLexText().equals("SIDENTIFIER")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		return checkVariableExistence(currentToken.getPasText());
+	}
+	
+	private static void index() throws ParserSyntaxError, CheckerSemanticError{
+		String eqType;
+		eqType = equation();
+		if(!eqType.equals("integer")) throw new CheckerSemanticError(currentToken.getLineNumber());
+	}
+	
+	private static void procedureCallStatement() throws ParserSyntaxError, CheckerSemanticError{
+		String procName;
+		procName = procedureName();
+		
+		Function function = searchFunctions(procName);
+		
+		LinkedList<String> eqTypes = new LinkedList<String>();
+		int counter = 0;
+		Token tokenTMP = LL(1);
+		
+		if(tokenTMP.getPasText().equals("(")) {
+			getToken();
+			eqTypes = equationSeq();
+			
+			getToken();
+			if (!currentToken.getPasText().equals(")")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		}
+		if (eqTypes.size() != function.parameters.size()) throw new CheckerSemanticError(currentToken.getLineNumber());
+		for(Variable parameter : function.parameters) {
+			String typeName = parameter.type;
+			if(!typeName.equals(eqTypes.get(counter++))) throw new CheckerSemanticError(currentToken.getLineNumber());
+		}
+	}
+	
+	private static Function searchFunctions(String functionName) throws ParserSyntaxError, CheckerSemanticError{
+		for(Function function : functions) {
+			if(function.name.equals(functionName)) return function;
+		}
+		throw new CheckerSemanticError(currentToken.getLineNumber());
+	}
+	
+	private static LinkedList<String> equationSeq() throws ParserSyntaxError, CheckerSemanticError{
+		LinkedList<String> eqTypes = new LinkedList<String>();
+		LinkedList<String> eqTypes2 = new LinkedList<String>();
+		String eqType = equation();
+		
+		eqTypes.add(eqType);
+		Token tokenTMP = LL(1);
+		if (tokenTMP.getPasText().equals(",")) {
+			getToken();
+			eqTypes2 = equationSeq();
+			eqTypes.addAll(eqTypes2);
+		}
+		return eqTypes;
+	}
+	
+	private static String equation() throws ParserSyntaxError, CheckerSemanticError{
+		String simpEqType1, simpEqType2, operator;
+		simpEqType1 = simpleEquation();
+
+		Token tokenTMP = LL(1);
+		if(isRelationalOperator(tokenTMP.getPasText())) {
+			operator = tokenTMP.getPasText();
+			getToken();
+			simpEqType2 = equation();
+			simpEqType1 = typeFinder(simpEqType1, simpEqType2, operator);
+		}
+		return simpEqType1;
+	}
+	
+	private static String simpleEquation() throws ParserSyntaxError, CheckerSemanticError{
+		Token tokenTMP = LL(1);
+		String nextWord = tokenTMP.getPasText();
+		String clauseType;
+		
+		if(isSymbol(nextWord)) getToken();
+		
+		clauseType = clause();
+		
+		clauseType = simpleEquation2(clauseType);
+		return clauseType;
+	}
+	
+	private static String simpleEquation2(String clauseType) throws ParserSyntaxError, CheckerSemanticError{
+		Token tokenTMP = LL(1);
+		String clauseType1, clauseType2, operator;
+		clauseType1 = clauseType;
+		if(isAdditionOperator(tokenTMP.getPasText())) {
+			operator = tokenTMP.getPasText();
+			getToken();
+			clauseType2 = clause();
+			clauseType1 = typeFinder(clauseType1, clauseType2, operator);
+			clauseType1 = simpleEquation2(clauseType1);
+		}
+		return clauseType1;
+	}
+	
+	private static String clause() throws ParserSyntaxError, CheckerSemanticError{
+		String factorType1, factorType2, operator;
+		factorType1 = factor();
+		
+		String nextWord = LL(1).getPasText();		
+		if(isMultiplicationOperator(nextWord)) {
+			operator = nextWord;
+			getToken();
+			factorType2 = clause();
+			factorType1 = typeFinder(factorType1, factorType2, operator);
+		}
+		return factorType1;
+	}
+	
+	private static String factor() throws ParserSyntaxError, CheckerSemanticError{
+		Token tokenTMP = LL(1);
+		String nextLexWord = tokenTMP.getLexText();
+		
+		if(isConstant(nextLexWord)) {
+			getToken();
+			return findFactorTypeConstant(nextLexWord);
+		}
+		else if(nextLexWord.equals("SLPAREN")) {
+			String equationType;
+			getToken();
+			equationType = equation();
+			
+			getToken();
+			nextLexWord = currentToken.getLexText();
+			
+			if(!nextLexWord.equals("SRPAREN")) throw new ParserSyntaxError(currentToken.getLineNumber());
+			return equationType;
+		}
+		else if(nextLexWord.equals("SNOT")) {
+			String factorType;
+			getToken();
+			factorType = factor();
+			if (!factorType.equals("boolean")) throw new CheckerSemanticError(currentToken.getLineNumber());
+			return "boolean";
+		}
+		else {
+			String varType;
+			varType = variable();
+			return varType;
+		}
+	}
+	
+	private static String findFactorTypeConstant(String nextLexWord) throws CheckerSemanticError{
+		switch(nextLexWord) {
+		case "SFALSE" :
+		case "STRUE"  :
+			return "boolean";
+		case "SCONSTANT" : 
+			return "integer";
+		case "SSTRING" :
+			return "string";
+		default :
+			throw new CheckerSemanticError(currentToken.getLineNumber());
+		}			
+	}
+	
+	private static boolean isRelationalOperator(String symbol){
+		if(symbol.equals("=") || symbol.equals("<>") || symbol.equals("<") || symbol.equals("<=") || symbol.equals(">") || symbol.equals(">=")) return true;
+		return false;
+	}
+	
+	private static boolean isAdditionOperator(String symbol) throws ParserSyntaxError{
+		if(symbol.equals("+") || symbol.equals("-") || symbol.equals("or")) return true;
+		return false;
+	}
+	
+	private static boolean isMultiplicationOperator(String symbol) throws ParserSyntaxError{
+		if(symbol.equals("*") || symbol.equals("/") || symbol.equals("div") || symbol.equals("mod") || symbol.equals("and")) return true;
+		return false;
+	}
+	
+	private static void inOutStatement() throws ParserSyntaxError, CheckerSemanticError{
+		Token tokenTMP = LL(1);
+		String nextWordTMP = tokenTMP.getPasText();
+		
+		if(nextWordTMP.equals("readln")) {
+			getToken();
+			nextWordTMP = LL(1).getPasText();
+			
+			if(!nextWordTMP.equals("(")) return;
+			
+			getToken();
+			varSeq();
+			
+			getToken();
+			nextWordTMP = currentToken.getPasText();
+			if(!nextWordTMP.equals(")")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		}
+		else if(nextWordTMP.equals("writeln")) {
+			getToken();
+			
+			nextWordTMP = LL(1).getPasText();
+			
+			if(!nextWordTMP.equals("(")) return;
+			
+			getToken();
+			
+			equationSeq();
+			
+			getToken();
+			nextWordTMP = currentToken.getPasText();
+			if(!nextWordTMP.equals(")")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		}
+		else throw new ParserSyntaxError(tokenTMP.getLineNumber());
+	}
+	
+	private static void varSeq() throws ParserSyntaxError, CheckerSemanticError{
+		variable();
+		
+		Token token = LL(1);
+		if (!token.getPasText().equals(",")) return;
+		
+		getToken();
+		varSeq();
+	}
+	
+	private static boolean isConstant(String nextLexWord) throws ParserSyntaxError{		
+		if(nextLexWord.equals("SCONSTANT") || nextLexWord.equals("SSTRING") || nextLexWord.equals("SFALSE") || nextLexWord.equals("STRUE")) return true;
+		return false;
+	}
+	
+	private static void getToken() throws ParserSyntaxError{
+		if((index+1) >= tokens.size()) throw new ParserSyntaxError(tokens.get(index).getLineNumber());
+		currentToken = tokens.get(++index);
+	}
+	
+	private static Token LL(int k) throws ParserSyntaxError{
+		if((index+k) < tokens.size()) return tokens.get(index+k);
+		throw new ParserSyntaxError(tokens.get(index).getLineNumber());
+	}
+	
+	private static void checkCurrentVariableName(String varName) throws CheckerSemanticError{
+		for(Variable variable : scopeVariables) {
+			if(varName.equals(variable.name)) {
+				throw new CheckerSemanticError(currentToken.getLineNumber());
+			}
+		}
+	}
+	
+	private static String checkVariableExistence(String varName) throws CheckerSemanticError{
+		for(LinkedList<Variable> scopeVariables_ : useableScopeVariables) {
+			for(Variable variable : scopeVariables_) {
+				if(varName.equals(variable.name)) return variable.type;
+			}
+		}
+		throw new CheckerSemanticError(currentToken.getLineNumber());
+	}
+	
+	private static boolean isIntegerOperator(String operatorName) {
+		switch(operatorName) {
+		case "+" :
+		case "-" :
+		case "*" :
+		case "/" :
+		case "mod" :
+		case "div" :
+			return true;
+		default :
+			return false;
+		}
+	}
+	
+	private static boolean isLogicalOperator(String operatorName) {
+		switch(operatorName) {
+		case "and":
+		case "or" :
+			return true;
+		default :
+			return false;
+		}
+	}
+	
+	private static String typeFinder(String type1, String type2, String operator) throws CheckerSemanticError {
+		if (isIntegerOperator(operator)) {
+			if(type1.equals("integer") && type2.equals("integer")) return "integer";
+		}
+		else if (isLogicalOperator(operator)) {
+			if(type1.equals("boolean") && type2.equals("boolean")) return "boolean";
+		}
+		else if (isRelationalOperator(operator)) return "boolean";
+		throw new CheckerSemanticError(currentToken.getLineNumber());
+	}
+	private static void removeRecentScope() {
+		useableScopeVariables.remove(0);
+	}
+}

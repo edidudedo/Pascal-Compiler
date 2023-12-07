@@ -1,0 +1,1199 @@
+package enshud.s4.compiler;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedList;
+import java.util.List;
+
+import enshud.casl.CaslSimulator;
+
+
+public class Compiler {
+	// kadai2
+	static List<Token> tokens;
+	static Token currentToken;
+	static int index;
+
+	// kadai3
+	static LinkedList<LinkedList<Variable>> useableScopeVariables;
+	static LinkedList<LinkedList<Variable>> allScopeVariables;
+	static int scopeVariableCounter;
+	static LinkedList<Variable> scopeVariables;
+	static LinkedList<Function> functions;
+	
+	// kadai4
+	static LinkedList<String> stringConstants;
+	static Path fileName;
+	
+	static String procBuffer;
+	static LinkedList<String> procBuffers;
+	static String wholeCASLBuffer;
+	
+	static int addressCounter;
+	static int relationCounter;
+	static int ifCounter;
+	static int whileCounter;
+	
+	/**
+	 * サンプルmainメソッド．
+	 * 単体テストの対象ではないので自由に改変しても良い．
+	 */
+	public static void main(final String[] args) {
+		new Compiler().run("data/ts/normal03.ts", "tmp/out.cas");
+		CaslSimulator.run("tmp/out.cas", "tmp/out.ans");
+	}
+
+	/**
+	 * TODO
+	 * 
+	 * 開発対象となるCompiler実行メソッド．
+	 * 以下の仕様を満たすこと．
+	 * 
+	 * 仕様:
+	 * 第一引数で指定されたtsファイルを読み込み，CASL IIプログラムにコンパイルする．
+	 * コンパイル結果のCASL IIプログラムは第二引数で指定されたcasファイルに書き出すこと．
+	 * 構文的もしくは意味的なエラーを発見した場合は標準エラーにエラーメッセージを出力すること．
+	 * （エラーメッセージの内容はChecker.run()の出力に準じるものとする．）
+	 * 入力ファイルが見つからない場合は標準エラーに"File not found"と出力して終了すること．
+	 * 
+	 * @param inputFileName 入力tsファイル名
+	 * @param outputFileName 出力casファイル名
+	 */
+	public void run(final String inputFileName, final String outputFileName) {
+		tokens = new ArrayList<Token>();
+		index=-1;
+		useableScopeVariables = new LinkedList<LinkedList<Variable>>();
+		allScopeVariables = new LinkedList<LinkedList<Variable>>();
+		functions = new LinkedList<Function>();
+		fileName = Path.of(outputFileName);
+		stringConstants = new LinkedList<String>();
+		procBuffers = new LinkedList<String>();
+		relationCounter = 0;
+		ifCounter = 0;
+		whileCounter = 0;
+		scopeVariableCounter = 0;
+		addressCounter = 0;
+		wholeCASLBuffer = "";
+	
+		try {
+			tokenAnalysis(inputFileName);
+			
+			printCASLinitial();
+			program();
+			printCASLend();
+			printProc2(wholeCASLBuffer);
+			
+			System.out.println("OK");
+		}
+		catch(ParserSyntaxError e)  
+		{  
+			e.printError();
+		} 
+		catch (CheckerSemanticError e) {
+			e.printError();
+		}
+		catch (IOException e) {
+			System.err.println("File not found");
+		}
+		
+	}
+	
+	private static void printCASLinitial() throws IOException{
+		printProc("CASL\tSTART\tBEGIN\t;\n");
+		printProc("BEGIN\tLAD GR6, 0\t;\n");
+		printProc("\tLAD GR7, LIBBUF\t;\n");
+	}
+	
+	private static void printCASLend() throws IOException{
+		int counter = 0;
+		printProc("VAR\tDS\t" + findTotalVariableNumber() + "\t;\n");
+		for(String stringConstant : stringConstants) printProc("CHAR" + counter++ + "\tDC\t" + stringConstant + "\t;\n");
+		printProc("LIBBUF\tDS\t256\t;\n");
+		printProc("\tEND\t;");
+		
+		printProc("\n\n");
+		Path fileName = Path.of("data/cas/lib.cas");
+		String content = Files.readString(fileName);
+		printProc(content);
+	}
+	
+	
+	private static void tokenAnalysis(final String inputFileName) throws IOException {
+		int counter, counter2;
+		char c;
+		String word = "";
+		String pasText = null;
+		String lexText = null;
+		String ID = null;
+		String lineNumber = null;
+		
+		counter2 = 0;
+		// analyze the file
+		Path fileName = Path.of(inputFileName);
+		String line = Files.readString(fileName);
+		for (counter=0; counter < line.length(); counter++) {
+			c = line.charAt(counter);
+			if (!isWhiteSpace(c)) {
+				word+=c;
+				continue;
+			}
+			switch(counter2) {
+			case 0:
+				pasText = word;
+				break;
+			case 1:
+				lexText = word;
+				break;
+			case 2:
+				ID = word;
+				break;
+			case 3:
+				lineNumber = word;
+				lineNumber = lineNumber.replaceAll("\\r", "");
+				tokens.add(new Token(pasText,lexText, ID, lineNumber));
+				break;
+			default :
+				break;
+			}
+			word = "";
+			counter2 = ++counter2%4;
+		}	
+	}
+	
+	private static void program() throws ParserSyntaxError, CheckerSemanticError {
+		getToken();
+		if (!currentToken.getPasText().equals("program")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		programName();
+		
+		getToken();
+		if (!currentToken.getPasText().equals(";")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		block();
+		
+		scopeVariableCounter = 0;
+		resetProcBuffer();
+		complexStatement();
+		printProc(procBuffer);
+		
+		getToken();
+		if (!currentToken.getPasText().equals(".")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		printProc("\tRET\t;\n");
+		
+		for (String buffer : procBuffers) {
+			printProc(buffer);
+			printProc("\tRET\t;\n");
+		}
+	}
+	
+	private static void programName() throws ParserSyntaxError, CheckerSemanticError{
+		getToken();
+		if (!currentToken.getLexText().equals("SIDENTIFIER")) throw new ParserSyntaxError(currentToken.getLineNumber());
+	}
+
+	private static void block() throws ParserSyntaxError, CheckerSemanticError{
+		// initialize scopeVariables
+		scopeVariables = new LinkedList<Variable>();
+		varDec();
+		useableScopeVariables.addFirst(scopeVariables);
+		allScopeVariables.addLast(scopeVariables);
+		
+		procBuffers = new LinkedList<String>();
+		subDecGroup();
+	}
+	
+	private static void varDec() throws ParserSyntaxError, CheckerSemanticError{
+		Token tokenTMP = LL(1);
+		if (!tokenTMP.getPasText().equals("var")) return;
+		getToken();
+		
+		varDecSeq();
+	}
+	
+	private static void varDecSeq() throws ParserSyntaxError, CheckerSemanticError{
+		LinkedList<String> varNames = new LinkedList<String>();
+		Type varType;
+		
+		varNames = varNameSeq();
+			
+		getToken();
+		if (!currentToken.getPasText().equals(":")) throw new ParserSyntaxError(currentToken.getLineNumber());
+			
+		varType = type();
+			
+		getToken();
+		if (!currentToken.getPasText().equals(";")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		for(String varName : varNames) {
+			scopeVariables.add(new Variable(varName, varType, addressCounter, (addressCounter = addressCounter + varType.endIndex - varType.startIndex)));
+			addressCounter ++;
+		}
+		
+		Token tokenTMP = LL(1);
+		if(!tokenTMP.getLexText().equals("SIDENTIFIER")) return;
+		varDecSeq();
+	}
+	
+	private static LinkedList<String> varNameSeq() throws ParserSyntaxError, CheckerSemanticError{
+		LinkedList<String> varNames = new LinkedList<String>();
+		varNames.add(varName());
+	
+		Token tokenTMP = LL(1);
+		if(tokenTMP.getPasText().equals(",")) {
+			getToken();
+			varNames.addAll(varNameSeq());
+		}
+		return varNames;
+	}
+	
+	private static String varName() throws ParserSyntaxError, CheckerSemanticError{	
+		getToken();
+		if (!currentToken.getLexText().equals("SIDENTIFIER")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		checkCurrentVariableName(currentToken.getPasText());
+		return currentToken.getPasText();
+	}
+	
+	private static Type type() throws ParserSyntaxError, CheckerSemanticError{
+		String typeName;
+		Type type;
+		Token tokenTMP = LL(1);
+		String nextWord = tokenTMP.getPasText();
+		
+		if(isStandardType(nextWord)) {
+			getToken();
+			
+			typeName = getCurrentVariableType();
+			
+			return new Type(typeName, 1,1);
+		}
+		else if(nextWord.equals("array")) {
+			type = arrayType();
+			return type;
+		}
+		else throw new ParserSyntaxError(tokenTMP.getLineNumber());
+	}
+	
+	private static boolean isStandardType(String typeName) throws ParserSyntaxError{
+		if(typeName.equals("integer") || typeName.equals("char") || typeName.equals("boolean")) return true;
+		return false;
+	}
+	
+	private static String standardType() throws ParserSyntaxError, CheckerSemanticError{
+		String type;
+		getToken();
+		type = getCurrentVariableType();
+		if(!isStandardType(currentToken.getPasText())) throw new ParserSyntaxError(currentToken.getLineNumber());
+		return type;
+	}
+	
+	private static Type arrayType() throws ParserSyntaxError, CheckerSemanticError{
+		String typeName;
+		int minIndex_, maxIndex_;
+		getToken();
+		
+		if (!currentToken.getPasText().equals("array")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		getToken();
+		if (!currentToken.getPasText().equals("[")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		minIndex_ = minIndex();
+		
+		getToken();
+		if (!currentToken.getPasText().equals("..")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		maxIndex_ = maxIndex();
+
+		getToken();
+		if (!currentToken.getPasText().equals("]")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		getToken();
+		if (!currentToken.getPasText().equals("of")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		typeName = "Array of ";
+		typeName += standardType();
+		
+		return new Type(typeName, minIndex_, maxIndex_);
+	}
+	
+	private static int minIndex() throws ParserSyntaxError {
+		return integer();
+	}
+	
+	private static int maxIndex() throws ParserSyntaxError {
+		return integer();
+	}
+	
+	private static String getCurrentVariableType() throws CheckerSemanticError{
+		String currentTokenType = currentToken.getLexText();
+		switch(currentTokenType) {
+		case "SBOOLEAN" :
+			return "boolean";
+		case "SINTEGER" :
+			return "integer";
+		case "SCHAR" :
+			return "char"; 
+		default :
+			throw new CheckerSemanticError(currentToken.getLineNumber());
+		}
+	}
+	private static int integer() throws ParserSyntaxError{
+		getToken();
+		if(isSymbol(currentToken.getPasText())) getToken();
+		
+		if (!currentToken.getLexText().equals("SCONSTANT")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		return Integer.parseInt(currentToken.getPasText());
+	}
+	
+	private static boolean isSymbol(String symbolValue) throws ParserSyntaxError{
+		if(symbolValue.equals("+") || symbolValue.equals("-")) return true;
+		return false;
+	}
+	
+	private static void subDecGroup() throws ParserSyntaxError, CheckerSemanticError{
+		Token tokenTMP = LL(1);
+		if(tokenTMP.getPasText().equals("procedure")) {		
+			
+			scopeVariableCounter++;
+			resetProcBuffer();
+			subDec();
+			
+			getToken();
+			if (!currentToken.getPasText().equals(";")) throw new ParserSyntaxError(currentToken.getLineNumber());
+			
+			removeRecentScope();
+			
+			procBuffers.add(procBuffer);
+			
+			subDecGroup();
+		}
+	}
+	
+	private static void subDec() throws ParserSyntaxError, CheckerSemanticError{
+		LinkedList<Variable> parameters = new LinkedList<Variable>();
+		int argCounter;
+		scopeVariables = new LinkedList<Variable>();
+		parameters = subDecHead();
+		
+		printCASL("PROC" + (scopeVariableCounter-1) + "\tNOP\t;\n");
+		
+		argCounter = parameters.size();
+		
+		varDec();
+		
+		useableScopeVariables.addFirst(scopeVariables);
+		allScopeVariables.addLast(scopeVariables);
+		
+		printCASL("\tLD\tGR1, GR8\t;\n");
+		printCASL("\tADDA\tGR1,=" + argCounter + "\t;\n");
+		if (argCounter > 0) {
+			for(int i = 0 ; i<argCounter; i++) {
+				printCASL("\tLD\tGR2, 0, GR1\t;\n");
+				printCASL("\tLD\tGR3, =" + findVariableNumber(parameters.get(i).name)+"\t;\n");
+				printCASL("\tST\tGR2, VAR, GR3\t;\n");
+				printCASL("\tSUBA\tGR1,=1\t;\n");
+			}
+			printCASL("\tLD\tGR1, 0, GR8\t;\n");
+			printCASL("\tADDA\tGR8,=" + argCounter+ "\t;\n");
+			printCASL("\tST\tGR1, 0, GR8\t;\n");
+		}
+		complexStatement();	
+	}
+	
+	private static LinkedList<Variable> subDecHead() throws ParserSyntaxError, CheckerSemanticError{
+		String procName;
+		LinkedList<Variable> parameters = new LinkedList<Variable>();
+		getToken();
+		if (!currentToken.getPasText().equals("procedure")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		procName = procedureName();
+		parameters = tempParameter();
+		
+		functions.add(new Function(procName, parameters, scopeVariableCounter-1));
+		
+		getToken();
+		
+		if (!currentToken.getPasText().equals(";")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		return parameters;
+	}
+	
+	private static LinkedList<Variable> tempParameter() throws ParserSyntaxError, CheckerSemanticError{
+		LinkedList<Variable> parameters = new LinkedList<Variable>();
+		Token tokenTMP = LL(1);
+		if (!tokenTMP.getPasText().equals("(")) return parameters;
+		getToken();
+		
+		parameters = tempParameterSeq();
+		
+		getToken();
+		if (!currentToken.getPasText().equals(")")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		return parameters;
+	}
+	
+	private static String procedureName() throws ParserSyntaxError{
+		getToken();
+		if (!currentToken.getLexText().equals("SIDENTIFIER")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		return currentToken.getPasText();
+	}
+	
+	private static LinkedList<Variable> tempParameterSeq() throws ParserSyntaxError, CheckerSemanticError{
+		LinkedList<String> parNames = new LinkedList<String>();
+		String typeName;
+		LinkedList<Variable> parameters =  new LinkedList<Variable>();
+		Token tokenTMP;
+		
+		parNames = tempParameterNameSeq();
+		
+		getToken();
+		if (!currentToken.getPasText().equals(":")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		typeName = standardType();
+		for(String parName : parNames) {
+			Variable variable = new Variable(parName, new Type(typeName, 1,1), addressCounter, addressCounter++);
+			variable.isReferenced = true;
+			parameters.add(variable);
+			scopeVariables.add(variable);
+		}
+		tokenTMP = LL(1);
+		if (tokenTMP.getPasText().equals(";")) {
+			getToken();
+			parameters.addAll(tempParameterSeq());
+		}
+		return parameters;
+	}
+	
+	private static LinkedList<String> tempParameterNameSeq() throws ParserSyntaxError, CheckerSemanticError{
+		LinkedList<String> parNames = new LinkedList<String>();
+		parNames.add(tempParameterName());
+		
+		Token tokenTMP = LL(1);
+		if (tokenTMP.getPasText().equals(",")) {
+			getToken();
+			parNames.addAll(tempParameterNameSeq());
+		}
+		return parNames;
+	}
+	
+	private static String tempParameterName() throws ParserSyntaxError, CheckerSemanticError{
+		getToken();
+		if (!currentToken.getLexText().equals("SIDENTIFIER")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		checkCurrentVariableName(currentToken.getPasText());
+		return currentToken.getPasText();
+	}
+	
+	private static void complexStatement() throws ParserSyntaxError, CheckerSemanticError{	
+		getToken();
+		if (!currentToken.getPasText().equals("begin")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		sentenceSeq();
+		
+		getToken();
+		if (!currentToken.getPasText().equals("end")) throw new ParserSyntaxError(currentToken.getLineNumber());
+	}
+	
+	private static void sentenceSeq() throws ParserSyntaxError, CheckerSemanticError{
+		sentence();
+		
+		getToken();
+		if (!currentToken.getPasText().equals(";")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		Token tokenTMP = LL(1);
+		String nextLexWord = tokenTMP.getLexText();
+		
+		if(nextLexWord.equals("SIF") || nextLexWord.equals("SWHILE") || nextLexWord.equals("SIDENTIFIER") 
+				||nextLexWord.equals("SBEGIN") || nextLexWord.equals("SWRITELN") || nextLexWord.equals("SREADLN") ) {	
+			sentenceSeq();
+		}
+	}
+	
+	
+	private static void sentence() throws ParserSyntaxError, CheckerSemanticError{
+		Token tokenTMP = LL(1);
+		String nextLexWord =tokenTMP.getLexText();
+		
+		if(nextLexWord.equals("SIF")) ifStatement();
+		else if(nextLexWord.equals("SWHILE")) whileStatement();
+		else if(nextLexWord.equals("SREADLN") || nextLexWord.equals("SWRITELN") || nextLexWord.equals("SIDENTIFIER") || nextLexWord.equals("SBEGIN")) basicStatement();
+		else throw new ParserSyntaxError(tokenTMP.getLineNumber());
+	}
+	
+	private static void ifStatement() throws ParserSyntaxError, CheckerSemanticError{
+		EquationReturnValue eqRet;
+		getToken();
+		int currentIfCounter = ifCounter++;
+		if (!currentToken.getPasText().equals("if")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		eqRet = equation();
+		
+		if(!eqRet.type.equals("boolean")) throw new CheckerSemanticError(currentToken.getLineNumber());
+
+		printCASL(eqRet.CASLBuffer);
+		printCASL("\tPOP GR1\t;\n");
+		printCASL("\tCPL\tGR1, =#FFFF\t;\n");
+		printCASL("\tJZE\tELSE" + currentIfCounter + "\t;\n");
+		
+		getToken();
+		if (!currentToken.getPasText().equals("then")) throw new ParserSyntaxError(currentToken.getLineNumber());	
+		
+		complexStatement();
+
+		Token tokenTMP = LL(1);
+		if (!tokenTMP.getPasText().equals("else")) {
+			printCASL("ELSE"+ currentIfCounter + "\tNOP\t;\n");
+			return;
+		}
+		printCASL("\tJUMP\tENDIF" + currentIfCounter + "\t;\n");
+		printCASL("ELSE"+ currentIfCounter + "\tNOP\t;\n");
+		getToken();
+		complexStatement();
+		
+		printCASL("ENDIF"+ currentIfCounter + "\tNOP\t;\n");
+	}
+	
+	private static void whileStatement() throws ParserSyntaxError, CheckerSemanticError{
+		int currentLoopCounter = whileCounter++;
+		EquationReturnValue eqRet;
+		
+		getToken();
+		
+		if (!currentToken.getPasText().equals("while")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		printCASL("LOOP" + currentLoopCounter + "\tNOP\t;\n");
+		
+		eqRet = equation();
+		if(!eqRet.type.equals("boolean")) throw new CheckerSemanticError(currentToken.getLineNumber());
+		
+		printCASL(eqRet.CASLBuffer);
+		printCASL("\tPOP GR1\t;\n");
+		printCASL("\tCPL\tGR1, =#FFFF\t;\n");
+		printCASL("\tJZE\tENDLP" + currentLoopCounter + "\t;\n");
+		
+		getToken();
+		
+		if (!currentToken.getPasText().equals("do")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		complexStatement();
+
+		printCASL("\tJUMP\tLOOP" + currentLoopCounter + "\t;\n");
+		printCASL("ENDLP" + currentLoopCounter + "\tNOP\t;\n");
+	}
+	
+	private static void basicStatement() throws ParserSyntaxError, CheckerSemanticError{	
+		Token tokenTMP = LL(1);
+		String nextLexWord = tokenTMP.getLexText();
+		
+		if(nextLexWord.equals("SIDENTIFIER")) {
+			tokenTMP= LL(2);
+			if(tokenTMP.getPasText().equals(":=") || tokenTMP.getPasText().equals("[")) subStatement();
+			else if(tokenTMP.getPasText().equals(";") || tokenTMP.getPasText().equals("(")) procedureCallStatement();
+			else throw new ParserSyntaxError(tokenTMP.getLineNumber());
+		}
+		else if(nextLexWord.equals("SREADLN") || nextLexWord.equals("SWRITELN")) inOutStatement();
+		else if(nextLexWord.equals("SBEGIN")) complexStatement();
+		else throw new ParserSyntaxError(tokenTMP.getLineNumber());
+	}
+	
+	private static void subStatement() throws ParserSyntaxError, CheckerSemanticError{
+		EquationReturnValue leftValue;
+		EquationReturnValue rightValue;
+		String CASLBufferTMP = "";
+		String varName = LL(1).getPasText();
+		
+		leftValue = leftSide();
+		CASLBufferTMP = leftValue.CASLBuffer;
+		
+		getToken();
+		if (!currentToken.getPasText().equals(":=")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		
+		rightValue = equation();
+		if(!leftValue.type.equals(rightValue.type)) throw new CheckerSemanticError(currentToken.getLineNumber());
+		
+		printCASL(rightValue.CASLBuffer);
+		if(!CASLBufferTMP.equals("")) {
+			printCASL(CASLBufferTMP);
+			printCASL("\tPOP\tGR2\t;\n");
+			printCASL("\tADDA\tGR2, =" + findVariableNumber(varName) + "\t;\n");
+		}
+		else printCASL("\tLD\tGR2, =" + findVariableNumber(varName) + "\t;\n");
+		printCASL("\tPOP\tGR1\t;\n");
+		printCASL("\tST\tGR1, VAR, GR2\t;\n");
+	}
+	
+	private static EquationReturnValue leftSide() throws ParserSyntaxError, CheckerSemanticError{
+		return variable();
+	}
+	
+	private static EquationReturnValue variable() throws ParserSyntaxError, CheckerSemanticError{
+		Token tokenTMP = LL(1);
+		if(!tokenTMP.getLexText().equals("SIDENTIFIER")) throw new ParserSyntaxError(tokenTMP.getLineNumber());
+		return variable2();
+	}
+	
+	private static EquationReturnValue variable2() throws ParserSyntaxError, CheckerSemanticError{
+		String type;
+		type = varName_();
+		EquationReturnValue indexRet, varRet = new EquationReturnValue(type, "", "");
+		
+		Token tokenTMP = LL(1);
+		if(tokenTMP.getPasText().equals("[")) {
+			
+			getToken();
+			
+			indexRet = index();
+			
+			getToken();
+			if(!currentToken.getPasText().equals("]")) throw new ParserSyntaxError(currentToken.getLineNumber());
+			varRet.type = type.substring(9);
+			varRet.CASLBuffer = indexRet.CASLBuffer;
+		}
+		return varRet;
+	}
+	
+	private static String varName_() throws ParserSyntaxError, CheckerSemanticError{	
+		getToken();
+		if (!currentToken.getLexText().equals("SIDENTIFIER")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		return checkVariableExistence(currentToken.getPasText());
+	}
+	
+	private static EquationReturnValue index() throws ParserSyntaxError, CheckerSemanticError{
+		EquationReturnValue eqRet;
+		eqRet = equation();
+		if(!eqRet.type.equals("integer")) throw new CheckerSemanticError(currentToken.getLineNumber());
+		return eqRet;
+	}
+	
+	private static void procedureCallStatement() throws ParserSyntaxError, CheckerSemanticError{
+		String procName;
+		procName = procedureName();
+		
+		Function function = searchFunctions(procName);
+		
+		LinkedList<EquationReturnValue> eqRets = new LinkedList<EquationReturnValue>();
+		int counter = 0;
+		Token tokenTMP = LL(1);
+		if(tokenTMP.getPasText().equals("(")) {
+			getToken();
+			
+			eqRets = equationSeq();
+			
+			getToken();
+			if (!currentToken.getPasText().equals(")")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		}
+		if (eqRets.size() != function.parameters.size()) throw new CheckerSemanticError(currentToken.getLineNumber());
+		for(Variable parameter : function.parameters) {
+			String typeName = parameter.type.typeName;
+			if(!typeName.equals(eqRets.get(counter++).type)) throw new CheckerSemanticError(currentToken.getLineNumber());
+		}
+		for (EquationReturnValue eqRet : eqRets) {
+			printCASL(eqRet.CASLBuffer);
+		}
+		printCASL("\tCALL\tPROC" + function.number + "\t;\n");
+	}
+	
+	private static LinkedList<EquationReturnValue> equationSeq() throws ParserSyntaxError, CheckerSemanticError{
+		LinkedList<EquationReturnValue> eqRets = new LinkedList<EquationReturnValue>();
+		LinkedList<EquationReturnValue> eqRets2 = new LinkedList<EquationReturnValue>();
+		
+		EquationReturnValue eqRet = equation();
+		
+		eqRets.add(eqRet);
+		
+		Token tokenTMP = LL(1);
+		if (tokenTMP.getPasText().equals(",")) {
+			getToken();
+			eqRets2 = equationSeq();
+			eqRets.addAll(eqRets2);
+		}
+		return eqRets;
+	}
+	
+	private static EquationReturnValue equation() throws ParserSyntaxError, CheckerSemanticError{
+		String operatorName;
+		EquationReturnValue simpEqRet1, simpEqRet2;
+		simpEqRet1 = simpleEquation();
+
+		Token tokenTMP = LL(1);
+		
+		while(isRelationalOperator(tokenTMP.getPasText())) {
+			operatorName = tokenTMP.getPasText();
+			getToken();
+			simpEqRet2 = simpleEquation();
+			simpEqRet1.type = typeFinder(simpEqRet1.type, simpEqRet2.type, operatorName);
+			
+			simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, simpEqRet2.CASLBuffer); 
+			simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tPOP\tGR2\t;\n"); 
+			simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tPOP\tGR1\t;\n");
+			simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tCPA\tGR1,GR2\t;\n");
+			switch(operatorName) {
+			case "=" :
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tJZE\tTRUE" + relationCounter + "\t;\n");
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tLD GR1, =#FFFF\t;\n");
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tJUMP BOTH" + relationCounter + "\t;\n");
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "TRUE" + relationCounter +"\tLD GR1, =#0000\t;\n");
+				break;
+			case "<>" :
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tJNZ\tTRUE" + relationCounter + "\t;\n");
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tLD GR1, =#FFFF\t;\n");
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tJUMP BOTH" + relationCounter + "\t;\n");
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "TRUE" + relationCounter +"\tLD GR1, =#0000\t;\n");
+				break;
+			case "<" :
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tJMI\tTRUE" + relationCounter + "\t;\n");
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tLD GR1, =#FFFF\t;\n");
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tJUMP BOTH" + relationCounter + "\t;\n");
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "TRUE" + relationCounter +"\tLD GR1, =#0000\t;\n");
+				break;
+			case "<=" :
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tJPL\tTRUE" + relationCounter + "\t;\n");
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tLD GR1, =#0000\t;\n");
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tJUMP BOTH" + relationCounter + "\t;\n");
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "TRUE" + relationCounter +"\tLD GR1, =#FFFF\t;\n");
+				break;
+			case ">" :
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tJPL\tTRUE" + relationCounter + "\t;\n");
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tLD GR1, =#FFFF\t;\n");
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tJUMP BOTH" + relationCounter + "\t;\n");
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "TRUE" + relationCounter +"\tLD GR1, =#0000\t;\n");
+				break;
+			case ">=" :
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tJMI\tTRUE" + relationCounter + "\t;\n");
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tLD GR1, =#0000\t;\n");
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "\tJUMP BOTH" + relationCounter + "\t;\n");
+				simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "TRUE" + relationCounter +"\tLD GR1, =#FFFF\t;\n");
+				break;
+			}
+			simpEqRet1.CASLBuffer = addCASL(simpEqRet1.CASLBuffer, "BOTH" + relationCounter + "\tPUSH\t0, GR1\t;\n");
+			relationCounter++;
+			
+			tokenTMP = LL(1);
+		}
+		return simpEqRet1;
+	}
+	
+	private static EquationReturnValue simpleEquation() throws ParserSyntaxError, CheckerSemanticError{
+		Token tokenTMP = LL(1);
+		String nextWord = tokenTMP.getPasText();
+		EquationReturnValue clauseRet;
+		String symbolName = "";
+		
+		if(isSymbol(nextWord)) {
+			symbolName = nextWord;
+			getToken();
+		}
+		
+		clauseRet = clause();
+		
+		if(symbolName.equals("-")) {
+			clauseRet.CASLBuffer = addCASL(clauseRet.CASLBuffer, "\tPOP\tGR2\t;\n");
+			clauseRet.CASLBuffer = addCASL(clauseRet.CASLBuffer, "\tLD\tGR1, =0\t;\n");
+			clauseRet.CASLBuffer = addCASL(clauseRet.CASLBuffer, "\tSUBA\tGR1, GR2\t;\n");
+			clauseRet.CASLBuffer = addCASL(clauseRet.CASLBuffer, "\tPUSH\t0, GR1\t;\n");
+		}
+		
+		clauseRet = simpleEquation2(clauseRet);
+		
+		return clauseRet;
+	}
+	
+	private static EquationReturnValue simpleEquation2(EquationReturnValue clauseRet) throws ParserSyntaxError, CheckerSemanticError{
+		Token tokenTMP = LL(1);
+		String operator;
+		EquationReturnValue clauseRet1, clauseRet2;
+		clauseRet1 = clauseRet;
+		while(isAdditionOperator(tokenTMP.getPasText())) {
+			operator = tokenTMP.getPasText();
+			getToken();
+			clauseRet2 = clause();
+			clauseRet1.type = typeFinder(clauseRet1.type, clauseRet2.type, operator);
+			
+			clauseRet1.CASLBuffer = addCASL(clauseRet1.CASLBuffer, clauseRet2.CASLBuffer);
+			clauseRet1.CASLBuffer = addCASL(clauseRet1.CASLBuffer, "\tPOP\tGR2\t;\n"); 
+			clauseRet1.CASLBuffer = addCASL(clauseRet1.CASLBuffer, "\tPOP\tGR1\t;\n");
+			switch(operator) {
+			case "+" : 
+				clauseRet1.CASLBuffer = addCASL(clauseRet1.CASLBuffer, "\tADDA\tGR1, GR2\t;\n");
+				break;
+			case "-" :
+				clauseRet1.CASLBuffer = addCASL(clauseRet1.CASLBuffer, "\tSUBA\tGR1, GR2\t;\n");
+				break;
+			case "or" : 
+				clauseRet1.CASLBuffer = addCASL(clauseRet1.CASLBuffer, "\tOR\tGR1, GR2\t;\n"); 
+				break;
+			default :
+				break;
+ 			}
+			clauseRet1.CASLBuffer = addCASL(clauseRet1.CASLBuffer, "\tPUSH\t0, GR1\t;\n");
+			tokenTMP = LL(1);
+		}
+		return new EquationReturnValue(clauseRet1.type, clauseRet1.value, clauseRet1.CASLBuffer);
+	}
+	
+	private static EquationReturnValue clause() throws ParserSyntaxError, CheckerSemanticError{
+		EquationReturnValue factorRet1, factorRet2;
+		factorRet1 = factor();
+		
+		String operatorName = LL(1).getPasText();
+		
+		while(isMultiplicationOperator(operatorName)) {
+			getToken();
+			factorRet2 = factor();
+			factorRet1.type = typeFinder(factorRet1.type, factorRet2.type, operatorName);
+			
+			factorRet1.CASLBuffer = addCASL(factorRet1.CASLBuffer,factorRet2.CASLBuffer);
+			factorRet1.CASLBuffer = addCASL(factorRet1.CASLBuffer, "\tPOP\tGR2\t;\n"); 
+			factorRet1.CASLBuffer = addCASL(factorRet1.CASLBuffer, "\tPOP\tGR1\t;\n");
+			switch(operatorName) {
+			case "*" : 
+				factorRet1.CASLBuffer = addCASL(factorRet1.CASLBuffer, "\tCALL\tMULT\t;\n"); 
+				factorRet1.CASLBuffer = addCASL(factorRet1.CASLBuffer, "\tPUSH\t0, GR2\t;\n");
+				break;
+			case "/" :
+			case "div" : 
+				factorRet1.CASLBuffer = addCASL(factorRet1.CASLBuffer, "\tCALL\tDIV\t;\n"); 
+				factorRet1.CASLBuffer = addCASL(factorRet1.CASLBuffer, "\tPUSH\t0, GR2\t;\n");
+				break;
+			case "mod" : 
+				factorRet1.CASLBuffer = addCASL(factorRet1.CASLBuffer,"\tCALL\tDIV\t;\n"); 
+				factorRet1.CASLBuffer  = addCASL(factorRet1.CASLBuffer, "\tPUSH\t0, GR1\t;\n");
+				break;
+			case "and" :
+				factorRet1.CASLBuffer = addCASL(factorRet1.CASLBuffer, "\tAND\tGR1, GR2\t;\n");
+				factorRet1.CASLBuffer = addCASL(factorRet1.CASLBuffer, "\tPUSH\t0, GR1\t;\n");
+				break;
+			default :
+				break;
+ 			}
+			operatorName = LL(1).getPasText();
+		}
+		return new EquationReturnValue(factorRet1.type, factorRet1.value, factorRet1.CASLBuffer);
+	}
+	
+	private static EquationReturnValue factor() throws ParserSyntaxError, CheckerSemanticError{
+		Token tokenTMP = LL(1);
+		String nextLexWord = tokenTMP.getLexText();
+		String typeValue;
+		String CASLBuffer_ = "";
+		if(isConstant(nextLexWord)) {
+			typeValue = tokenTMP.getPasText();
+			getToken();
+			switch(nextLexWord) {
+			case "SCONSTANT" :
+				CASLBuffer_ = addCASL(CASLBuffer_, "\tPUSH\t" + tokenTMP.getPasText() + "\t;\n");
+				break;
+			case "SSTRING" :
+				if(tokenTMP.getPasText().length()!=3) {
+					stringConstants.add(tokenTMP.getPasText());
+					CASLBuffer_ = addCASL(CASLBuffer_, "\tLD\tGR1, =" + (tokenTMP.getPasText().length()-2) + "\t;\n");
+					CASLBuffer_ = addCASL(CASLBuffer_, "\tPUSH\t0, GR1\t;\n");
+					CASLBuffer_ = addCASL(CASLBuffer_, "\tLAD\tGR2, CHAR" + (stringConstants.size()-1) + "\t;\n");
+					CASLBuffer_ = addCASL(CASLBuffer_, "\tPUSH\t0, GR2\t;\n");
+				}
+				else {
+					CASLBuffer_ = addCASL(CASLBuffer_, "\tLD\tGR1, =" + tokenTMP.getPasText() + "\t;\n");
+					CASLBuffer_ = addCASL(CASLBuffer_, "\tPUSH\t0, GR1\t;\n");
+				}
+				break;
+			case "STRUE" :
+				CASLBuffer_ = addCASL(CASLBuffer_, "\tPUSH\t#0000\t;\n");
+				break;
+			case "SFALSE" :
+				CASLBuffer_ = addCASL(CASLBuffer_, "\tPUSH\t#FFFF\t;\n");
+				break;
+			}
+			return new EquationReturnValue(findFactorTypeConstant(nextLexWord), typeValue, CASLBuffer_);
+		}
+		else if(nextLexWord.equals("SLPAREN")) {
+			EquationReturnValue eqRet;
+			getToken();
+			eqRet = equation();
+			
+			getToken();
+			nextLexWord = currentToken.getLexText();
+			
+			if(!nextLexWord.equals("SRPAREN")) throw new ParserSyntaxError(currentToken.getLineNumber());
+			return new EquationReturnValue(eqRet.type, eqRet.value, eqRet.CASLBuffer);
+		}
+		else if(nextLexWord.equals("SNOT")) {
+			EquationReturnValue facRet;
+			getToken();
+			facRet = factor();
+			if (!facRet.type.equals("boolean")) throw new CheckerSemanticError(currentToken.getLineNumber());
+			
+			CASLBuffer_ = addCASL(facRet.CASLBuffer, "\tPOP\tGR1\t;\n");
+			CASLBuffer_ = addCASL(CASLBuffer_, "\tXOR\tGR1, =#FFFF\t;\n");
+			CASLBuffer_ = addCASL(CASLBuffer_, "\tPUSH\t0, GR1\t;\n");
+			return new EquationReturnValue("boolean", facRet.value,CASLBuffer_);
+		}
+		else {
+			String varName;
+			EquationReturnValue varRet;
+			varName = LL(1).getPasText();
+			varRet = variable();
+			if(isArray(varName)) {
+				CASLBuffer_  = addCASL(varRet.CASLBuffer, "\tPOP\tGR2\t;\n");
+				CASLBuffer_  = addCASL(CASLBuffer_, "\tADDA\tGR2, ="+ findVariableNumber(varName) + "\t;\n");
+			}
+			else CASLBuffer_ = addCASL(varRet.CASLBuffer, "\tLD\tGR2, =" + findVariableNumber(varName) + "\t;\n");
+			CASLBuffer_  = addCASL(CASLBuffer_,"\tLD\tGR1, VAR, GR2\t;\n");
+			CASLBuffer_ = addCASL(CASLBuffer_, "\tPUSH\t0, GR1\t;\n");
+			return new EquationReturnValue(varRet.type,varRet.value,CASLBuffer_);
+		}
+	}
+	
+	private static void inOutStatement() throws ParserSyntaxError, CheckerSemanticError{
+		Token tokenTMP = LL(1);
+		String nextWordTMP = tokenTMP.getPasText();
+		LinkedList<EquationReturnValue> eqRets = new LinkedList<EquationReturnValue>();
+		
+		if(nextWordTMP.equals("readln")) {
+			getToken();
+			nextWordTMP = LL(1).getPasText();
+			
+			if(!nextWordTMP.equals("(")) return;
+			
+			getToken();
+			varSeq();
+			
+			getToken();
+			nextWordTMP = currentToken.getPasText();
+			if(!nextWordTMP.equals(")")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		}
+		else if(nextWordTMP.equals("writeln")) {
+			getToken();
+			
+			nextWordTMP = LL(1).getPasText();
+			
+			if(!nextWordTMP.equals("(")) return;
+			
+			getToken();
+			
+			eqRets = equationSeq();
+			
+			for(EquationReturnValue eqRet : eqRets) {
+				String eqType = eqRet.type;
+				
+				printCASL(eqRet.CASLBuffer);
+				printCASL("\tPOP\t GR2\t;\n");
+				if (eqRet.type.equals("Array of char")) printCASL("\tPOP\t GR1\t;\n");
+				printCASL("\tCALL\tWRT" + changeEqType(eqType) + "\t;\n");
+			}
+			printCASL("\tCALL\tWRTLN\t;\n");
+			
+			getToken();
+			nextWordTMP = currentToken.getPasText();
+			if(!nextWordTMP.equals(")")) throw new ParserSyntaxError(currentToken.getLineNumber());
+		}
+		else throw new ParserSyntaxError(tokenTMP.getLineNumber());
+	}
+	
+	private static void varSeq() throws ParserSyntaxError, CheckerSemanticError{
+		variable();
+		
+		Token token = LL(1);
+		if (!token.getPasText().equals(",")) return;
+		
+		getToken();
+		varSeq();
+	}
+	
+/////// FROM HERE IS UTILITY
+	
+	private static String findFactorTypeConstant(String nextLexWord) throws CheckerSemanticError{
+		switch(nextLexWord) {
+		case "SFALSE" :
+		case "STRUE"  :
+			return "boolean";
+		case "SCONSTANT" : 
+			return "integer";
+		case "SSTRING" :
+			if(currentToken.getPasText().length() == 3) return "char";
+			return "Array of char";
+		default :
+			throw new CheckerSemanticError(currentToken.getLineNumber());
+		}			
+	}
+	
+	private static boolean isRelationalOperator(String symbol){
+		if(symbol.equals("=") || symbol.equals("<>") || symbol.equals("<") || symbol.equals("<=") || symbol.equals(">") || symbol.equals(">=")) return true;
+		return false;
+	}
+	
+	private static boolean isAdditionOperator(String symbol) throws ParserSyntaxError{
+		if(symbol.equals("+") || symbol.equals("-") || symbol.equals("or")) return true;
+		return false;
+	}
+	
+	private static boolean isMultiplicationOperator(String symbol) throws ParserSyntaxError{
+		if(symbol.equals("*") || symbol.equals("/") || symbol.equals("div") || symbol.equals("mod") || symbol.equals("and")) return true;
+		return false;
+	}
+	
+	private static boolean isConstant(String nextLexWord) throws ParserSyntaxError{		
+		if(nextLexWord.equals("SCONSTANT") || nextLexWord.equals("SSTRING") || nextLexWord.equals("SFALSE") || nextLexWord.equals("STRUE")) return true;
+		return false;
+	}
+	
+	private static boolean isIntegerOperator(String operatorName) {
+		switch(operatorName) {
+		case "+" :
+		case "-" :
+		case "*" :
+		case "/" :
+		case "mod" :
+		case "div" :
+			return true;
+		default :
+			return false;
+		}
+	}
+	
+	private static boolean isLogicalOperator(String operatorName) {
+		switch(operatorName) {
+		case "and":
+		case "or" :
+			return true;
+		default :
+			return false;
+		}
+	}
+	
+	private static boolean isWhiteSpace(char c) {
+		return c == '\t' || c == '\n';
+	}
+	
+	private static boolean isArray(String varName) {
+		for(LinkedList<Variable> scopeVariables : useableScopeVariables) {
+			for(Variable variable : scopeVariables) {
+				if(varName.equals(variable.name)) {
+					if(variable.endAddress == variable.startAddress) return false;
+					else return true;
+				}
+			}
+		}
+		return false;
+	}
+	
+	private static void getToken() throws ParserSyntaxError{
+		if((index+1) >= tokens.size()) throw new ParserSyntaxError(tokens.get(index).getLineNumber());
+		currentToken = tokens.get(++index);
+	}
+	
+	private static Token LL(int k) throws ParserSyntaxError{
+		if((index+k) < tokens.size()) return tokens.get(index+k);
+		throw new ParserSyntaxError(tokens.get(index).getLineNumber());
+	}
+	
+	private static void checkCurrentVariableName(String varName) throws CheckerSemanticError{
+		for(Variable variable : scopeVariables) {
+			if(varName.equals(variable.name)) throw new CheckerSemanticError(currentToken.getLineNumber());
+		}
+	}
+	
+	private static String checkVariableExistence(String varName) throws CheckerSemanticError{
+		for(LinkedList<Variable> scopeVariables_ : useableScopeVariables) {
+			for(Variable variable : scopeVariables_) {
+				if(varName.equals(variable.name)) return variable.type.typeName;
+			}
+		}
+		throw new CheckerSemanticError(currentToken.getLineNumber());
+	}
+	
+	private static String typeFinder(String type1, String type2, String operator) throws CheckerSemanticError {
+		if (isIntegerOperator(operator)) {
+			if(type1.equals("integer") && type2.equals("integer")) return "integer";
+		}
+		else if (isLogicalOperator(operator)) {
+			if(type1.equals("boolean") && type2.equals("boolean")) return "boolean";
+		}
+		else if (isRelationalOperator(operator)) return "boolean";
+		throw new CheckerSemanticError(currentToken.getLineNumber());
+	}
+	private static void removeRecentScope() {
+		addressCounter = useableScopeVariables.getFirst().getLast().startAddress;
+		useableScopeVariables.remove(0);
+	}
+	
+	private static void printCASL(String words) {
+		procBuffer += words;
+	}
+	
+	private static void resetProcBuffer() {
+		procBuffer = "";
+	}
+	
+	private static String addCASL(String CASLBuffer, String words) {
+		return CASLBuffer + words;
+	}
+	
+	private static void printProc(String words) {
+		wholeCASLBuffer+=words;
+	}
+	private static void printProc2(String words) {
+		try {
+			Files.writeString(fileName, words);
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+	}
+	
+	private static String changeEqType(String type) {
+		switch(type) {
+		case "integer" :
+			return "INT";
+		case "char" : 
+			return "CH";
+		case "Array of char" : 
+			return "STR";
+		default :
+			return "";
+ 		}
+	}
+
+	private static int findVariableNumber(String varName) {
+		int counter = 0;
+		if(scopeVariableCounter!=0) {
+			for (int i = 0; i<scopeVariableCounter; i++) {
+				for(Variable variable : allScopeVariables.get(i)) {
+					counter+=variable.endAddress-variable.startAddress+1;
+				}
+			}
+			for(Variable variable : allScopeVariables.get(scopeVariableCounter)) {
+				if(varName.equals(variable.name)) {
+					if(!isArray(varName)) return counter;
+					else return counter- variable.type.startIndex;
+				}
+				counter+=variable.endAddress-variable.startAddress+1;
+			}
+		}
+		counter = 0;
+		for(Variable variable : allScopeVariables.get(0)) {
+			if(varName.equals(variable.name)) {
+				if(!isArray(varName)) {
+					return counter;
+				}
+				else return counter- variable.type.startIndex;
+			}
+			counter+=variable.endAddress-variable.startAddress+1;
+		}
+		return -1;
+	}
+	
+	private static int findTotalVariableNumber() {
+		int counter = 0;
+		for(LinkedList<Variable>scopeVariables : allScopeVariables) {
+			for (Variable variable : scopeVariables) {
+				counter += variable.endAddress-variable.startAddress+1;
+			}
+		}
+		return counter;
+	}
+	
+	private static Function searchFunctions(String functionName) throws ParserSyntaxError, CheckerSemanticError{
+		for(Function function : functions) {
+			if(function.name.equals(functionName)) return function;
+		}
+		throw new CheckerSemanticError(currentToken.getLineNumber());
+	}
+}
